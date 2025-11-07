@@ -3,7 +3,6 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Camera, Upload, X, Check, AlertCircle, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
-import { BackButton } from '../ui/BackButton';
 
 interface CardCaptureScreenProps {
   onCapture: (file: File) => void;
@@ -198,9 +197,9 @@ export function CardCaptureScreen({ onCapture, onCancel, onPrevious, onNext }: C
       <div className="absolute top-4 left-4 right-4 flex items-center justify-between z-10 max-w-6xl mx-auto">
         <button
           onClick={onPrevious || onCancel}
-          disabled={!onPrevious && !onCancel}
+          disabled={!onPrevious}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${
-            (onPrevious || onCancel)
+            onPrevious
               ? 'bg-white text-gray-700 hover:bg-green-50 hover:text-green-700 border border-gray-300 hover:border-green-300 shadow-sm'
               : 'bg-gray-100 text-gray-400 cursor-not-allowed'
           }`}

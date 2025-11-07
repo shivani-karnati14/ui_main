@@ -48,7 +48,7 @@ export function ResultScreen({
   };
  
   // Confidence score from API or default to 85%
-  const confidence = llmResponse?.confidence_score || structuredData.confidence || 0.85;
+  const confidence = (llmResponse as any)?.confidence_score || structuredData.confidence || 0.85;
   const confidencePercent = Math.round(confidence * 100);
  
   return (

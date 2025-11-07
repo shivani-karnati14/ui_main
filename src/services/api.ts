@@ -1,23 +1,107 @@
-import type { UploadCardResponse, ScheduleMeetingResponse, EmailDraftResponse } from '../types/cardScanner';
+import type {
+  UploadCardResponse,
+  ScheduleMeetingResponse,
+  EmailDraftResponse,
+  UserInfo,
+  LLMResponse,
+} from '../types/cardScanner';
 
-const API_BASE_URL = 'http://localhost:8000';
+/**
+ * Prefer explicit backend during development; fall back to localhost.
+ * In production, use VITE_BACKEND_URL or a hosted default.
+ */
+const API_BASE_URL = import.meta.env.DEV
+  ? (import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000')
+  : (import.meta.env.VITE_BACKEND_URL || 'https://syndy-aiagent-be-poc.onrender.com');
+
+function isJsonString(s: string) {
+  try {
+    JSON.parse(s);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Central response handler to reduce repetition */
+async function handleResponse(response: Response) {
+  const text = await response.text();
+  if (!response.ok) {
+    // Log full body for easier debugging in dev
+    console.error('🚨 Backend error response:', response.status, text);
+    if (isJsonString(text)) {
+      const json = JSON.parse(text);
+      const detail = json.detail || json.message || JSON.stringify(json);
+      throw new Error(detail || `Request failed: ${response.status}`);
+    }
+    throw new Error(text || `Request failed: ${response.status}`);
+  }
+
+  if (text) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
+  }
+  return null;
+}
+
+/** Normalize a raw getCardData response into a predictable shape used by the UI */
+function normalizeCardData(raw: any) {
+  if (!raw) return {
+    record_id: null,
+    image_url: null,
+    structured_data: {},
+    company_data: {},
+    llm_response: raw?.llm_response || null,
+    created_at: raw?.created_at || null,
+    processed_at: raw?.processed_at || null,
+    is_meeting_requested: raw?.is_meeting_requested || false,
+  };
+
+  // Different backends may return fields in slightly different places.
+  const structured = raw.structured_data || raw.llm_response?.extracted_data || raw.structured || {};
+  const company = raw.company_data || raw.structured_data?.company_data || raw.additional_info?.company_data || {};
+  return {
+    record_id: raw.record_id || raw.transactionID || raw.transaction_id || null,
+    image_url: raw.image_url || raw.image || raw.imageUrl || null,
+    structured_data: structured,
+    company_data: company,
+    llm_response: raw.llm_response || (raw.llm_response ? raw.llm_response : null),
+    created_at: raw.created_at || raw.createdAt || null,
+    processed_at: raw.processed_at || raw.processedAt || null,
+    is_meeting_requested: raw.is_meeting_requested || raw.isMeetingRequested || false,
+    raw,
+  };
+}
+
+// BusinessCardData interface for compatibility in checkProcessingStatus
+export interface BusinessCardData {
+  transaction_id: string;
+  image_url: string | null;
+  processing_status: 'pending' | 'processing' | 'completed' | 'failed';
+  llm_response: LLMResponse | null;
+  created_at?: string;
+  processed_at?: string | null;
+}
 
 export class CardScannerAPI {
   /**
    * Ping endpoint to check backend availability
    * Returns true if backend is reachable, false otherwise
    */
-  static async pingBackend(): Promise<boolean> {
+  static async pingBackend(timeoutMs = 5000): Promise<boolean> {
     try {
-      console.log('🏓 Pinging backend:', `${API_BASE_URL}/ping`);
-      const response = await fetch(`${API_BASE_URL}/ping`, {
+      const url = `${API_BASE_URL}/ping`;
+      console.log('🏓 Pinging backend:', url);
+      const response = await fetch(url, {
         method: 'GET',
-        signal: AbortSignal.timeout(5000), // 5 second timeout
+        signal: (AbortSignal as any).timeout ? AbortSignal.timeout(timeoutMs) : undefined,
       });
-      
-      const isReachable = response.ok;
-      console.log(isReachable ? '✅ Backend is reachable' : '❌ Backend returned error');
-      return isReachable;
+      const reachable = response.ok;
+      console.log(reachable ? '✅ Backend is reachable' : `❌ Backend returned ${response.status}`);
+      return reachable;
     } catch (error) {
       console.error('❌ Backend is not reachable:', error);
       return false;
@@ -25,249 +109,238 @@ export class CardScannerAPI {
   }
 
   /**
+   * Health check endpoint - detailed backend status
+   */
+  static async healthCheck(): Promise<any> {
+    try {
+      const url = `${API_BASE_URL}/health`;
+      console.log('🏥 Checking backend health:', url);
+      const response = await fetch(url, {
+        method: 'GET',
+        signal: (AbortSignal as any).timeout ? AbortSignal.timeout(5000) : undefined,
+      });
+      return await handleResponse(response);
+    } catch (error) {
+      console.error('❌ Health check failed:', error);
+      throw error;
+    }
+  }
+
+  /**
    * API 1: Process business card image with AI Vision
-   * 
-   * Flow:
-   * 1. Receives business card image
-   * 2. Processes image with OpenAI Vision API
-   * 3. Extracts structured data (name, email, phone, company, etc.)
-   * 4. Detects QR codes if present
-   * 5. Saves to database automatically
-   * 6. Returns structured data immediately
+   * POST /ai-business-card
    */
   static async uploadCard(imageFile: File): Promise<UploadCardResponse> {
-    // Validation
-    if (!imageFile) {
-      throw new Error('No file provided');
-    }
+    if (!imageFile) throw new Error('No file provided');
 
     const validTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
     if (!validTypes.includes(imageFile.type)) {
-      throw new Error(`Invalid file type. Please upload a JPEG or PNG image.`);
+      throw new Error('Invalid file type. Please upload a JPEG, PNG, or WEBP image.');
     }
 
     const maxSize = 10 * 1024 * 1024; // 10MB
     if (imageFile.size > maxSize) {
-      throw new Error(`File size exceeds 10MB limit.`);
+      throw new Error('File size exceeds 10MB limit.');
     }
 
     const formData = new FormData();
     formData.append('file', imageFile, imageFile.name);
-    
+
     console.log('📤 Uploading card image:', imageFile.name, imageFile.type, `${(imageFile.size / 1024).toFixed(2)}KB`);
 
-    const response = await fetch(`${API_BASE_URL}/ai-business-card`, {
-      method: 'POST',
-      body: formData,
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('❌ Upload error:', response.status, errorText);
-      
+    // Quick reachability check to fail fast when backend is down
+    try {
+      const backendReachable = await this.pingBackend(3000);
+      if (!backendReachable) {
+        throw new Error('Backend not reachable. Please check backend URL or network.');
+      }
+    } catch (err) {
+      console.warn('⚠️ Ping check failed prior to upload:', err);
+      throw err;
+    }
+
+    // Prefer the namespaced API endpoint if available, fall back to legacy ai-business-card
+    const preferredUrl = `${API_BASE_URL}/api/uploadBusinessCard`;
+    const legacyUrl = `${API_BASE_URL}/ai-business-card`;
+
+    let result: any = null;
+    try {
+      console.log(`➡️ Attempting upload to preferred endpoint: ${preferredUrl}`);
+      const resp = await fetch(preferredUrl, { method: 'POST', body: formData });
+      result = await handleResponse(resp);
+    } catch (err) {
+      console.warn('⚠️ Preferred upload endpoint failed, falling back to legacy endpoint:', err);
       try {
-        const errorJson = JSON.parse(errorText);
-        throw new Error(errorJson.detail || `Upload failed: ${response.status}`);
-      } catch {
-        throw new Error(`Upload failed (${response.status}): ${errorText}`);
+        console.log(`➡️ Falling back to legacy endpoint: ${legacyUrl}`);
+        const resp2 = await fetch(legacyUrl, { method: 'POST', body: formData });
+        result = await handleResponse(resp2);
+      } catch (err2) {
+        console.error('❌ Both upload endpoints failed:', err2);
+        // Re-throw original error message for UI
+        throw err2;
       }
     }
-    
-    const result = await response.json();
-    console.log('✅ Upload successful:', result);
-    
-    // Backend returns record_id - map it to transactionID for consistency
-    // If record_id is not available, generate a fallback transactionID
-    const transactionID = result.record_id || result.transactionID || `txn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    // Return in the expected format with full AI response for immediate data access
+
+    // Map backend record_id to transactionID for consistency with frontend
+    const transactionID =
+      result?.record_id || result?.transactionID || `txn_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+
+    // Return a minimal compatibility object; cast via unknown to satisfy TS when backend response shape varies
     return {
       status: 200,
-      message: "User Card Image is stored and being processed",
-      transactionID: transactionID, // Using transactionID universally (record_id from backend mapped here)
-      aiResponse: result, // Include full AI response with structured_data, confidence, etc.
-    };
+      message: 'User Card Image is stored and being processed',
+      transactionID,
+      aiResponse: result,
+      // Provide a few compatibility fields expected by consumers
+      success: true,
+      filename: result?.filename || result?.file_name || imageFile.name,
+      method: 'upload',
+      structured_data: result?.structured_data || result?.llm_response || {},
+      confidence: result?.confidence || 0,
+      qr_codes: result?.qr_codes || [],
+      qr_count: result?.qr_count || 0,
+      formatted_output: result?.formatted_output || JSON.stringify(result || {}),
+      raw_analysis: result?.raw_analysis || JSON.stringify(result || {}),
+      additional_info: result?.additional_info || {},
+      saved_to_database: !!result?.saved_to_database,
+      database_available: !!result?.database_available,
+      record_id: result?.record_id || transactionID,
+    } as unknown as UploadCardResponse;
   }
 
   /**
-   * API 2: Fetch updated card data by transactionID (record_id)
-   * 
-   * Fetches the latest data from database including company enrichment (2nd LLM call)
-   * This is used to poll for company data completion
-   * 
-   * IMPORTANT: Update the endpoint URL below to match your backend API endpoint
-   * Common options:
-   * - GET /api/getCardData/{record_id}
-   * - GET /api/getUserInfo/{record_id}  
-   * - GET /api/customer-scanned-data/{record_id}
-   * - Or your custom endpoint
+   * API 2: Get complete card data including company enrichment
+   * GET /api/getCardData/{record_id}
    */
-  static async getCardData(transactionID: string): Promise<any> {
-    console.log('📥 Fetching card data for transaction:', transactionID);
+  static async getCardData(recordId: string): Promise<any> {
+    if (!recordId) throw new Error('No record ID provided');
+    const encodedId = encodeURIComponent(recordId);
+    const url = `${API_BASE_URL}/api/getCardData/${encodedId}`;
+    console.log('📥 Fetching complete card data for record:', recordId);
 
-    // TODO: Update this endpoint to match your backend API
-    // Replace with your actual endpoint that returns card data by record_id
-    const endpoint = `${API_BASE_URL}/api/getCardData/${transactionID}`;
-    
-    const response = await fetch(endpoint, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
+    const response = await fetch(url, { method: 'GET', headers: { 'Content-Type': 'application/json' } });
+    const raw = await handleResponse(response);
+    const normalized = normalizeCardData(raw);
+    console.log('🔧 Normalized card data keys:', Object.keys(normalized));
+    return normalized;
+  }
+
+  /**
+   * API 3: Record audio and convert to text without avatar
+   * POST /api/recordAudiowithoutAvatar
+   */
+  static async recordAudio(audioBlob: Blob): Promise<{ status: number; message: string; transcript: string; record_id: string }> {
+    if (!audioBlob) throw new Error('No audio blob provided');
+    console.log('🎤 Recording audio for transcription:', audioBlob.size, 'bytes');
+
+    const response = await fetch(`${API_BASE_URL}/api/recordAudiowithoutAvatar`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': audioBlob.type || 'audio/webm',
+      },
+      body: audioBlob,
     });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('❌ Fetch card data error:', response.status, errorText);
-      console.error('💡 Tip: Make sure your backend has an endpoint to fetch card data by record_id');
-      throw new Error(`Failed to fetch card data: ${response.status}. Endpoint: ${endpoint}`);
-    }
-    
-    const result = await response.json();
-    console.log('✅ Card data fetched:', result);
-    return result;
+
+    return await handleResponse(response);
   }
 
   /**
-   * API 3: Upload selfie image
-   * 
-   * Flow:
-   * 1. Receives selfie image file and record_id (transactionID)
-   * 2. Uploads image to Supabase storage
-   * 3. Updates record with selfie URL
-   * 4. Returns selfie URL and confirmation
+   * API 4: Get selfie URL for a record
+   * GET /api/getSelfieUrl/{record_id}
    */
-  static async uploadSelfie(recordId: string, selfieFile: File): Promise<{
-    status: number;
-    message: string;
-    record_id: string;
-    selfie_url: string;
-  }> {
-    // Validation
-    if (!selfieFile) {
-      throw new Error('No selfie file provided');
-    }
+  static async getSelfieUrl(recordId: string): Promise<{ status: number; record_id: string; selfie_url: string | null; selfie_exists: boolean; selfie_info: any }> {
+    if (!recordId) throw new Error('No record ID provided');
+    const encodedId = encodeURIComponent(recordId);
+    const url = `${API_BASE_URL}/api/getSelfieUrl/${encodedId}`;
+    console.log('📸 Getting selfie URL for record:', recordId);
 
-    if (!recordId) {
-      throw new Error('No record ID provided');
-    }
+    const response = await fetch(url, { method: 'GET', headers: { 'Content-Type': 'application/json' } });
+    return await handleResponse(response);
+  }
+
+  /**
+   * API 5: Upload selfie image
+   * POST /api/uploadSelfie?record_id={...}
+   */
+  static async uploadSelfie(recordId: string, selfieFile: File): Promise<{ status: number; message: string; record_id: string; selfie_url: string }> {
+    if (!selfieFile) throw new Error('No selfie file provided');
+    if (!recordId) throw new Error('No record ID provided');
 
     const validTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
     if (!validTypes.includes(selfieFile.type)) {
-      throw new Error(`Invalid file type. Please upload a JPEG or PNG image.`);
+      throw new Error('Invalid file type. Please upload a JPEG, PNG, or WEBP image.');
     }
-
     const maxSize = 10 * 1024 * 1024; // 10MB
-    if (selfieFile.size > maxSize) {
-      throw new Error(`File size exceeds 10MB limit.`);
-    }
+    if (selfieFile.size > maxSize) throw new Error('File size exceeds 10MB limit.');
 
     const formData = new FormData();
-    formData.append('file', selfieFile, selfieFile.name);
-    
+    formData.append('file', selfieFile);
+
+    const url = `${API_BASE_URL}/api/uploadSelfie?record_id=${encodeURIComponent(recordId)}`;
     console.log('📤 Uploading selfie:', selfieFile.name, selfieFile.type, `${(selfieFile.size / 1024).toFixed(2)}KB`);
     console.log('📋 Record ID:', recordId);
 
-    const response = await fetch(`${API_BASE_URL}/api/uploadSelfie?record_id=${recordId}`, {
-      method: 'POST',
-      body: formData,
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('❌ Selfie upload error:', response.status, errorText);
-      
-      try {
-        const errorJson = JSON.parse(errorText);
-        throw new Error(errorJson.detail || errorJson.message || `Selfie upload failed: ${response.status}`);
-      } catch {
-        throw new Error(`Selfie upload failed (${response.status}): ${errorText}`);
-      }
-    }
-    
-    const result = await response.json();
-    console.log('✅ Selfie upload successful:', result);
-    
-    return result;
+    const response = await fetch(url, { method: 'POST', body: formData });
+    return await handleResponse(response);
   }
 
   /**
-   * API 4: Generate email draft using LLM
-   * 
-   * Flow:
-   * 1. Receives record_id (transactionID)
-   * 2. Optionally accepts notes and audio_transcript in request body
-   * 3. Fetches all available context from database:
-   *    - summarised_llm_response (from business card analysis)
-   *    - summarised_llm_company_response (from company research)
-   *    - notes (optional)
-   *    - audio_transcript (optional)
-   * 4. Generates personalized email draft using OpenAI
-   * 5. Saves email draft to database
-   * 6. Returns generated email draft with subject and body
+   * API 6: Generate email draft using LLM
+   * POST /api/generateEmailDraft/{record_id}
    */
   static async generateEmailDraft(
     recordId: string,
-    options?: {
-      notes?: string;
-      audio_transcript?: string;
-    }
-  ): Promise<EmailDraftResponse> {
-    console.log('📧 Generating email draft for record:', recordId);
+    options?: { notes?: string; audio_transcript?: string; email?: string; email_draft?: string | object }
+  ): Promise<any> {
+    if (!recordId) throw new Error('No record ID provided');
 
     const requestBody: any = {};
-    if (options?.notes) {
-      requestBody.notes = options.notes;
-    }
-    if (options?.audio_transcript) {
-      requestBody.audio_transcript = options.audio_transcript;
-    }
+    if (options?.notes) requestBody.notes = options.notes;
+    if (options?.audio_transcript) requestBody.audio_transcript = options.audio_transcript;
+    if (options?.email) requestBody.email = options.email;
+    if (options?.email_draft) requestBody.email_draft = options.email_draft;
 
-    const response = await fetch(`${API_BASE_URL}/api/generateEmailDraft/${recordId}`, {
+    const url = `${API_BASE_URL}/api/generateEmailDraft/${encodeURIComponent(recordId)}`;
+    console.log('📧 Generating email draft for record:', recordId);
+
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody), // Always send JSON body (even if empty object)
+      body: JSON.stringify(requestBody),
     });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('❌ Email draft generation error:', response.status, errorText);
-      
-      try {
-        const errorJson = JSON.parse(errorText);
-        throw new Error(errorJson.detail || `Email draft generation failed: ${response.status}`);
-      } catch {
-        throw new Error(`Email draft generation failed (${response.status}): ${errorText}`);
-      }
-    }
-    
-    const result = await response.json();
-    console.log('✅ Email draft generated:', result);
-    return result;
+
+    return await handleResponse(response);
   }
 
   /**
-   * API 5: Initiate meeting scheduler
-   * 
-   * Flow:
-   * 1. Receives transactionID and isMeetingRequested
-   * 2. Receives includeSelfie flag (NEW)
-   * 3. Updates meeting request status in customer_userInfo_tbl
-   * 4. Checks customer data (P1 path) OR business card data (P2 path)
-   * 5. If includeSelfie is true, backend fetches selfie_url from database
-   * 6. Sends data to N8N for meeting scheduling (with selfie URL if includeSelfie is true)
-   * 7. Returns response with transactionID
+   * API 7: Summarize chat history
+   * POST /api/summarizeChatHistory/{record_id}
    */
+  static async summarizeChatHistory(recordId: string): Promise<any> {
+    if (!recordId) throw new Error('No record ID provided');
+
+    const url = `${API_BASE_URL}/api/summarizeChatHistory/${encodeURIComponent(recordId)}`;
+    console.log('📝 Summarizing chat history for record:', recordId);
+
+    const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    return await handleResponse(response);
+  }
+
+  /**
+   * Keep existing project features
+   */
+
+  // Schedule meeting (kept; endpoint unchanged)
   static async scheduleMeeting(
-    transactionID: string, 
+    transactionID: string,
     includeSelfie: boolean = false,
     emailDraft?: { to: string; subject: string; body: string }
   ): Promise<ScheduleMeetingResponse> {
     console.log('📅 Scheduling meeting:', { transactionID, includeSelfie, emailDraft });
-    
+
     const response = await fetch(`${API_BASE_URL}/api/intiateMeetingScheduler`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         record_id: transactionID, // Backend expects 'record_id'
         isMeetingRequested: true,
@@ -282,72 +355,19 @@ export class CardScannerAPI {
       }),
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      try {
-        const errorJson = JSON.parse(errorText);
-        throw new Error(errorJson.detail || `Meeting scheduling failed: ${response.status}`);
-      } catch {
-        throw new Error(`Meeting scheduling failed (${response.status}): ${errorText}`);
-      }
-    }
-
-    return response.json();
+    return await handleResponse(response);
   }
 
-  /**
-   * API 3: Generate Email Draft
-   * 
-   * Generates an AI-powered email draft based on:
-   * - Business card analysis (summarised_llm_response)
-   * - Company research (summarised_llm_company_response)
-   * - Optional notes and audio transcript
-   */
-  static async generateEmailDraft(recordId: string): Promise<{
-    success: boolean;
-    record_id: string;
-    email_draft: string;
-    email_subject: string;
-    email_body: string;
-    email_greeting: string;
-    email_summary: string;
-    context_used: {
-      business_card_summary: boolean;
-      company_summary: boolean;
-      notes: boolean;
-      audio_transcript: boolean;
-    };
-  }> {
-    console.log('📧 Generating email draft for record:', recordId);
-
-    const response = await fetch(`${API_BASE_URL}/api/generateEmailDraft/${recordId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('❌ Email draft generation error:', response.status, errorText);
-      throw new Error(`Failed to generate email draft: ${response.status}`);
-    }
-    
-    const result = await response.json();
-    console.log('✅ Email draft generated:', result);
-    return result;
-  }
-
-  // Add new method to save email draft
+  // Save email draft (kept; uses same endpoint as generate for persistence)
   static async saveEmailDraft(
     transactionID: string,
     emailDraft: { to: string; subject: string; body: string }
   ): Promise<{ success: boolean; message: string }> {
     console.log('📧 Saving email draft:', { transactionID, emailDraft });
-    
-    const response = await fetch(`${API_BASE_URL}/api/generateEmailDraft/${transactionID}`, {
+
+    const response = await fetch(`${API_BASE_URL}/api/generateEmailDraft/${encodeURIComponent(transactionID)}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         email_draft: {
           to: emailDraft.to,
@@ -357,16 +377,57 @@ export class CardScannerAPI {
       }),
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      try {
-        const errorJson = JSON.parse(errorText);
-        throw new Error(errorJson.detail || `Email draft save failed: ${response.status}`);
-      } catch {
-        throw new Error(`Email draft save failed (${response.status}): ${errorText}`);
-      }
+    return await handleResponse(response);
+  }
+
+  // Derive a simple processing status from getCardData
+  static async checkProcessingStatus(transactionID: string): Promise<BusinessCardData> {
+    const cardData = await this.getCardData(transactionID);
+
+    // Determine whether company enrichment has completed by checking for common company fields
+    const hasCompany = !!(
+      cardData.company_data && Object.keys(cardData.company_data).length > 0
+    ) || !!(
+      cardData.structured_data && (
+        cardData.structured_data.company_description || cardData.structured_data.industry || cardData.structured_data.num_of_employees
+      )
+    );
+
+    return {
+      transaction_id: transactionID,
+      image_url: cardData.image_url || null,
+      processing_status: hasCompany ? 'completed' : 'processing',
+      llm_response: cardData.llm_response || null,
+      created_at: cardData.created_at,
+      processed_at: cardData.processed_at || (hasCompany ? new Date().toISOString() : null),
+    };
     }
 
-    return response.json();
+  // Extract user info from card data
+  static async getUserInfo(transactionID: string): Promise<UserInfo> {
+    try {
+      const cardData = await this.getCardData(transactionID);
+      const extractedData = cardData.structured_data || cardData.llm_response?.extracted_data || {};
+      return {
+        transactionID,
+        email: extractedData.email || null,
+        name: extractedData.name || null,
+        phone: extractedData.phone || null,
+        company: extractedData.company || null,
+        is_meeting_requested: cardData.is_meeting_requested || false,
+        created_at: cardData.created_at || new Date().toISOString(),
+      };
+    } catch (error) {
+      console.error('❌ Failed to fetch user info:', error);
+      return {
+        transactionID,
+        email: null,
+        name: null,
+        phone: null,
+        company: null,
+        is_meeting_requested: false,
+        created_at: new Date().toISOString(),
+      };
+    }
   }
 }

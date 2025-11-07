@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Camera, Zap, Calendar } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { CardScannerAPI } from '../../services/api';
 
@@ -14,19 +13,12 @@ export function LandingScreen({ onStartScan, activeView = 'cardscanner', onNavCl
   const [backendStatus, setBackendStatus] = useState<'checking' | 'ready' | 'error'>('checking');
 
   useEffect(() => {
-    // Check backend status only when component mounts
     const checkBackend = async () => {
       const isReachable = await CardScannerAPI.pingBackend();
       setBackendStatus(isReachable ? 'ready' : 'error');
     };
     checkBackend();
   }, []);
-
-  const features = [
-    { icon: <Camera className="w-6 h-6" />, title: 'Instant Scanning', description: 'Capture business cards in seconds' },
-    { icon: <Zap className="w-6 h-6" />, title: 'AI-Powered', description: 'Smart extraction using advanced AI' },
-    { icon: <Calendar className="w-6 h-6" />, title: 'Easy Scheduling', description: 'Schedule meetings with one click' }
-  ];
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-emerald-50 via-white to-green-50 flex flex-col px-4 sm:px-6 overflow-y-auto pb-6 relative">
@@ -38,16 +30,7 @@ export function LandingScreen({ onStartScan, activeView = 'cardscanner', onNavCl
       >
         {/* Heading Section - Top */}
         <div className="text-center space-y-2 sm:space-y-3 md:space-y-4">
-          <div className="flex items-center justify-center gap-3 sm:gap-4 md:gap-5">
-            <motion.div
-              initial={{ scale: 0.9 }}
-              animate={{ scale: 1 }}
-              transition={{ delay: 0.2, type: 'spring' }}
-              className="inline-flex items-center justify-center w-14 h-14 sm:w-16 sm:h-16 md:w-20 md:h-20 rounded-3xl bg-gradient-to-r from-green-500 to-emerald-500 flex-shrink-0"
-            >
-              <Camera className="w-8 h-8 sm:w-10 sm:h-10 text-white" />
-            </motion.div>
-
+          <div className="flex items-center justify-center">
             <h1 className="text-xl sm:text-3xl md:text-4xl lg:text-5xl font-bold bg-gradient-to-r from-green-600 to-emerald-600 bg-clip-text text-transparent">
               Scan Business Cards
             </h1>
@@ -88,9 +71,7 @@ export function LandingScreen({ onStartScan, activeView = 'cardscanner', onNavCl
               WebkitBackdropFilter: 'blur(20px) saturate(180%)',
             }}
           >
-            {/* Status Dot with Glow */}
             <span className="relative flex h-2.5 w-2.5">
-              {/* Ping animation for ready state */}
               {backendStatus === 'ready' && (
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
               )}
@@ -112,34 +93,6 @@ export function LandingScreen({ onStartScan, activeView = 'cardscanner', onNavCl
           </div>
         </motion.div>
       </div>
-
-      {/* Features - Bottom */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5, delay: 0.2 }}
-        className="max-w-4xl w-full mx-auto pb-4"
-      >
-
-        {/* Features */}
-        <div className="grid md:grid-cols-3 gap-5 sm:gap-6 md:gap-8">
-          {features.map((feature, index) => (
-            <motion.div
-              key={index}
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.3 + index * 0.1 }}
-              className="bg-white/70 backdrop-blur-xl rounded-2xl p-4 sm:p-6 border border-gray-200 hover:border-green-300 transition-colors shadow-sm"
-            >
-              <div className="inline-flex items-center justify-center w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-gradient-to-r from-green-500/20 to-emerald-500/20 mb-3 sm:mb-4 text-green-600">
-                {feature.icon}
-              </div>
-              <h3 className="text-base sm:text-lg font-semibold text-gray-800 mb-1 sm:mb-2">{feature.title}</h3>
-              <p className="text-sm text-gray-600">{feature.description}</p>
-            </motion.div>
-          ))}
-        </div>
-      </motion.div>
     </div>
   );
 }

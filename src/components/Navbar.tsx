@@ -1,8 +1,5 @@
 import {
-  MessageSquare,
   Home,
-  Camera,
-  Upload,
   BarChart3,
   Settings,
   CreditCard,
@@ -43,9 +40,6 @@ function Navbar({ activeView, onNavClick }: NavbarProps) {
   const navItems: Array<{ label: string; icon: React.ReactNode; view: 'home' | 'chat' | 'scan' | 'upload' | 'analysis' | 'cardscanner' }> = [
     { label: 'Card Scanner', icon: <CreditCard className="w-5 h-5" />, view: 'cardscanner' },
     { label: 'Home', icon: <Home className="w-5 h-5" />, view: 'home' },
-    { label: 'Chatterbox', icon: <MessageSquare className="w-5 h-5" />, view: 'chat' },
-    { label: 'Scanner', icon: <Camera className="w-5 h-5" />, view: 'scan' },
-    { label: 'Upload Files', icon: <Upload className="w-5 h-5" />, view: 'upload' },
     { label: 'Analysis', icon: <BarChart3 className="w-5 h-5" />, view: 'analysis' },
   ];
 
